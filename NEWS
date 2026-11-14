@@ -1,3 +1,13 @@
+.. _release-1.48.2:
+
+1.48.2 - UNRELEASED
+-------------------
+
+* WAVE: Fix ``struct.error`` and file corruption when saving tags on
+  streaming WAV files whose root RIFF size field is set to the
+  ``0xFFFFFFFF`` unknown-size sentinel. The sentinel is now normalized to
+  the actual file size on the first modification.
+
 .. _release-1.48.1:
 
 1.48.1 - 2026-06-25

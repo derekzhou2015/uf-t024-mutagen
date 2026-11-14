@@ -1,9 +1,20 @@
 
 import os
+import struct
 
-from mutagen._riff import RiffFile, RiffChunk
+from mutagen._riff import RiffFile, RiffChunk, RIFF_UNKNOWN_SIZE
 
 from tests import TestCase, DATA_DIR, get_temp_copy
+
+
+def _set_root_riff_size(fileobj, size):
+    fileobj.seek(4)
+    fileobj.write(struct.pack("<I", size))
+
+
+def _get_root_riff_size(fileobj):
+    fileobj.seek(4)
+    return struct.unpack("<I", fileobj.read(4))[0]
 
 
 class TRiffFile(TestCase):
@@ -142,3 +153,68 @@ class TRiffFile(TestCase):
         self.failUnlessEqual(info_tags['INAM'], 'Silence')
         self.failUnlessEqual(info_tags['ITRK'], '02/10')
         self.failUnlessEqual(info_tags['ICRD'], '2004')
+
+    def test_streaming_sentinel_root_size(self):
+        # Streaming recorders write 0xFFFFFFFF as the root RIFF size.
+        _set_root_riff_size(self.file_2_tmp, RIFF_UNKNOWN_SIZE)
+        riff = RiffFile(self.file_2_tmp)
+        self.failUnlessEqual(riff.root.data_size, RIFF_UNKNOWN_SIZE)
+        self.failUnless(u'fmt' in riff)
+        self.failUnless(u'data' in riff)
+
+    def test_insert_chunk_normalizes_streaming_sentinel(self):
+        _set_root_riff_size(self.file_2_tmp, RIFF_UNKNOWN_SIZE)
+        riff = RiffFile(self.file_2_tmp)
+        riff.insert_chunk(u'id3')
+
+        # The sentinel gets replaced by the real size and the file stays
+        # internally consistent.
+        self.file_2_tmp.flush()
+        self.failIfEqual(riff.root.data_size, RIFF_UNKNOWN_SIZE)
+        self.failUnlessEqual(
+            riff.root.data_size,
+            os.fstat(self.file_2_tmp.fileno()).st_size
+            - RiffChunk.HEADER_SIZE)
+        self.failUnlessEqual(
+            _get_root_riff_size(self.file_2_tmp), riff.root.data_size)
+
+        new_riff = RiffFile(self.file_2_tmp)
+        self.failUnless(u'id3' in new_riff)
+        self.failUnlessEqual(new_riff[u'id3'].data_size, 0)
+
+    def test_resize_chunk_normalizes_streaming_sentinel(self):
+        _set_root_riff_size(self.file_2_tmp, RIFF_UNKNOWN_SIZE)
+        riff = RiffFile(self.file_2_tmp)
+        riff[u'data'].resize(128)
+
+        self.file_2_tmp.flush()
+        self.failIfEqual(riff.root.data_size, RIFF_UNKNOWN_SIZE)
+        self.failUnlessEqual(
+            _get_root_riff_size(self.file_2_tmp), riff.root.data_size)
+        new_riff = RiffFile(self.file_2_tmp)
+        self.failUnlessEqual(new_riff[u'data'].data_size, 128)
+
+    def test_delete_chunk_normalizes_streaming_sentinel(self):
+        _set_root_riff_size(self.file_1_tmp, RIFF_UNKNOWN_SIZE)
+        riff = RiffFile(self.file_1_tmp)
+        riff.delete_chunk(u'id3')
+
+        self.file_1_tmp.flush()
+        self.failIfEqual(riff.root.data_size, RIFF_UNKNOWN_SIZE)
+        self.failUnlessEqual(
+            _get_root_riff_size(self.file_1_tmp), riff.root.data_size)
+        new_riff = RiffFile(self.file_1_tmp)
+        self.failIf(u'id3' in new_riff)
+
+    def test_normal_root_size_still_uses_delta_arithmetic(self):
+        # Files without the streaming sentinel must keep their existing
+        # size-update behavior (no regressions for ordinary WAV files).
+        riff = RiffFile(self.file_1_tmp)
+        root_size_before = riff.root.data_size
+        data_size_before = riff[u'data'].data_size
+        riff[u'data'].resize(17000)
+        self.failUnlessEqual(
+            riff.root.data_size,
+            root_size_before + 17000 - data_size_before)
+        self.failUnlessEqual(
+            RiffFile(self.file_1_tmp)[u'data'].data_size, 17000)

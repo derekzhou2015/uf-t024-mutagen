@@ -1,5 +1,6 @@
 
 import os
+import struct
 from io import BytesIO
 
 import mutagen
@@ -7,6 +8,23 @@ import mutagen
 from mutagen.wave import WAVE
 from mutagen._iff import InvalidChunk
 from tests import TestCase, DATA_DIR, get_temp_copy
+
+
+RIFF_UNKNOWN_SIZE = 0xFFFFFFFF
+
+
+def _set_riff_size(path, size):
+    """Overwrites the size field of the root RIFF chunk."""
+
+    with open(path, "r+b") as fileobj:
+        fileobj.seek(4)
+        fileobj.write(struct.pack("<I", size))
+
+
+def _get_riff_size(path):
+    with open(path, "rb") as fileobj:
+        fileobj.seek(4)
+        return struct.unpack("<I", fileobj.read(4))[0]
 
 
 class TWave(TestCase):
@@ -244,3 +262,73 @@ class TWave(TestCase):
         id3.add(TORY(encoding=major, text="2011"))
         id3.add(TYER(encoding=major, text="2011"))
         id3.add(TDAT(encoding=major, text="2709"))
+
+    def _streaming_copy(self, source):
+        """A copy of `source` with the RIFF size set to the streaming
+        sentinel value 0xFFFFFFFF, as written by streaming recorders."""
+
+        path = get_temp_copy(source)
+        _set_riff_size(path, RIFF_UNKNOWN_SIZE)
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def test_streaming_riff_size_sentinel_loads(self):
+        path = self._streaming_copy(self.fn_wav_pcm_2s_16000_08_notags)
+        wav = WAVE(path)
+        self.assertIsNone(wav.tags)
+        self.assertEqual(wav.info.sample_rate, 16000)
+
+    def test_save_streaming_wav_without_tags(self):
+        from mutagen.id3 import TIT2
+
+        path = self._streaming_copy(self.fn_wav_pcm_2s_16000_08_notags)
+        wav = WAVE(path)
+        wav.add_tags()
+        wav.tags.add(TIT2(encoding=3, text=u"streaming title"))
+        wav.tags.save(path)
+
+        # The unknown size gets normalized to the actual RIFF size and the
+        # tag is readable.
+        self.assertEqual(_get_riff_size(path), os.path.getsize(path) - 8)
+        new = WAVE(path)
+        self.assertEqual(new[u"TIT2"], [u"streaming title"])
+
+        # Saving again must not change the file any further.
+        size_after_first_save = os.path.getsize(path)
+        new.save()
+        self.assertEqual(os.path.getsize(path), size_after_first_save)
+        self.assertEqual(_get_riff_size(path),
+                         size_after_first_save - 8)
+
+    def test_save_streaming_wav_with_existing_id3_chunk(self):
+        from mutagen.id3 import TIT2
+
+        path = self._streaming_copy(
+            os.path.join(DATA_DIR,
+                         "silence-2s-PCM-16000-08-ID3v23.wav"))
+        wav = WAVE(path)
+        self.assertEqual(wav[u"TIT2"], [u"Silence"])
+        wav.tags.add(TIT2(encoding=3, text=u"updated"))
+        wav.tags.save(path)
+
+        self.assertEqual(_get_riff_size(path), os.path.getsize(path) - 8)
+        self.assertEqual(WAVE(path)[u"TIT2"], [u"updated"])
+
+    def test_failed_save_does_not_modify_streaming_wav(self):
+        from unittest.mock import patch
+        from mutagen import _iff
+        from mutagen.wave import error as WaveError
+
+        path = self._streaming_copy(self.fn_wav_pcm_2s_16000_08_notags)
+        original_data = open(path, "rb").read()
+
+        wav = WAVE(path)
+        wav.add_tags()
+        # Simulate a write failure while the new chunk is inserted.
+        with patch.object(_iff, "insert_bytes",
+                          side_effect=OSError("simulated disk error")):
+            self.failUnlessRaises(WaveError, wav.tags.save, path)
+
+        # The file must be untouched and keep its streaming sentinel.
+        self.assertEqual(open(path, "rb").read(), original_data)
+        self.assertEqual(_get_riff_size(path), RIFF_UNKNOWN_SIZE)

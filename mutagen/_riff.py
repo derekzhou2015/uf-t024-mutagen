@@ -19,6 +19,15 @@ from mutagen._iff import (
 )
 
 
+# The maximum size representable in the 32 bit chunk size field.
+RIFF_MAX_SIZE = 0xFFFFFFFF
+
+# Streaming RIFF/WAVE writers are unable to know the final file size while
+# recording, so they set the size field of the root RIFF chunk to this
+# sentinel value instead of updating it.
+RIFF_UNKNOWN_SIZE = RIFF_MAX_SIZE
+
+
 class RiffChunk(IffChunk):
     """Generic RIFF chunk"""
 
@@ -54,6 +63,28 @@ class RiffListChunk(RiffChunk, IffContainerChunkMixin):
 
         RiffChunk.__init__(self, fileobj, id, data_size, parent_chunk)
         self.init_container()
+
+    def _update_size(self, size_diff, changed_subchunk=None):
+        # Streaming writers set the size of the root RIFF chunk to the
+        # 0xFFFFFFFF sentinel instead of tracking the real size. Adding to
+        # that value would overflow the 32 bit size field when it gets
+        # written, so derive the actual size from the file the first time
+        # the chunk is modified.
+        if (self.id == u'RIFF' and self.parent_chunk is None
+                and self.data_size == RIFF_UNKNOWN_SIZE):
+            fileobj = self._fileobj
+            fileobj.seek(0, 2)
+            actual_size = fileobj.tell() - self.HEADER_SIZE
+            if actual_size <= RIFF_MAX_SIZE:
+                self.data_size = actual_size
+                fileobj.seek(self.offset + 4)
+                self.write_size()
+                self._calculate_size()
+                if changed_subchunk:
+                    self._update_sibling_offsets(
+                        changed_subchunk, 0)
+                return
+        super()._update_size(size_diff, changed_subchunk)
 
 
 class RiffFile(IffFile):
